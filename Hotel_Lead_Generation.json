@@ -1,0 +1,559 @@
+{
+  "name": "Hotel Lead Generation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "f3d3414a-16d8-41e7-84ba-fcbf4534540e",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -3440,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1dH_lwlOHYJyzEnCP-AOnFzxodhWUrLEwoTd_fAIeG5A",
+          "mode": "list"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 216592968,
+          "mode": "list"
+        },
+        "options": {}
+      },
+      "id": "319014ff-fe8c-4219-aae1-ef0df7b71126",
+      "name": "Read Hotel Names",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [
+        -3232,
+        240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "<REDACTED_CREDENTIAL_ID>", "name": "<REDACTED_CREDENTIAL_NAME>"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst results = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  \n  // Get LLM output (format: \"domain.com|City, State\")\n  const llmOutput = item.json.text || item.json.output || '';\n  \n  let specificDomain = '';\n  let parentDomain = '';\n  let location = '';\n  \n  if (llmOutput && llmOutput.includes('|')) {\n    const parts = llmOutput.split('|');\n    specificDomain = parts[0].trim().toLowerCase().replace(/https?:\\/\\//g, '').replace(/www\\./g, '');\n    location = parts[1].trim();\n  }\n  \n  // Get the original hotel data\n  const hotelData = $('Read Hotel Names').all()[i]?.json || {};\n  const hotelName = hotelData['Hotel name'] || '';\n  \n  // Extract parent brand domain from hotel name\n  if (hotelName.toLowerCase().includes('holiday inn') || hotelName.toLowerCase().includes('ihg')) {\n    parentDomain = 'ihg.com';\n  } else if (hotelName.toLowerCase().includes('marriott')) {\n    parentDomain = 'marriott.com';\n  } else if (hotelName.toLowerCase().includes('hilton')) {\n    parentDomain = 'hilton.com';\n  } else if (hotelName.toLowerCase().includes('hyatt')) {\n    parentDomain = 'hyatt.com';\n  } else if (hotelName.toLowerCase().includes('hampton')) {\n    parentDomain = 'hilton.com';\n  } else if (hotelName.toLowerCase().includes('courtyard') || hotelName.toLowerCase().includes('residence inn')) {\n    parentDomain = 'marriott.com';\n  }\n  \n  // Use BOTH domains in search - Apollo will match if either exists\n  const domainsToSearch = [];\n  if (specificDomain) domainsToSearch.push(specificDomain);\n  if (parentDomain && parentDomain !== specificDomain) domainsToSearch.push(parentDomain);\n  \n  // If no domains found, just use location-based search\n  if (domainsToSearch.length === 0) {\n    console.log(` No domain found for: ${hotelName}, using location-only search`);\n  }\n  \n  // Create Apollo request body\n  const apolloRequestBody = {\n    person_locations: [location],\n    person_titles: [\n      \"General Manager\",\n      \"Assistant General Manager\",\n      \"Director of Housekeeping\",\n      \"Assistant Director of Housekeeping\"\n    ],\n    per_page: 10,\n    page: 1\n  };\n  \n  // Add domains only if we have them\n  if (domainsToSearch.length > 0) {\n    apolloRequestBody.organization_domains = domainsToSearch;\n  }\n  \n  results.push({\n    json: {\n      sr_no: hotelData['Sr. no.'] || '',\n      hotel_name: hotelName,\n      location: location,\n      company_domain: specificDomain || parentDomain || '',\n      \n      apollo_request_body: apolloRequestBody,\n      \n      // Debug\n      specific_domain: specificDomain,\n      parent_domain: parentDomain,\n      search_strategy: domainsToSearch.length > 0 ? 'domain+location' : 'location-only',\n      raw_llm_output: llmOutput\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "40e85a6c-740d-41a3-8719-38b1e80d8368",
+      "name": "Parse Domain Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2448,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apollo.io/api/v1/mixed_people/api_search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.apollo_request_body }}",
+        "options": {}
+      },
+      "id": "7b28c496-921b-497d-99a8-00bbb465e0b2",
+      "name": "Apollo People Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2160,
+        240
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "<REDACTED_CREDENTIAL_ID>", "name": "<REDACTED_CREDENTIAL_NAME>"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst contacts = [];\n\nconst hotelDataItems = $('Parse Domain Output').all();\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const searchResults = item.json.people || [];\n  \n  const hotelData = hotelDataItems[i]?.json || {};\n  \n  console.log(`\\n=== Hotel ${i}: ${hotelData.hotel_name} ===`);\n  console.log(`Found ${searchResults.length} contacts`);\n  \n  for (const person of searchResults) {\n    // Log what we're getting from Apollo\n    console.log(`\\nPerson data:`, JSON.stringify(person, null, 2));\n    \n    // Extract phone numbers\n    const phones = person.phone_numbers || [];\n    const directPhone = person.direct_phone || person.corporate_phone || '';\n    const workPhone = phones.find(p => p.type === 'work')?.sanitized_number || directPhone;\n    \n    // Extract name fields - CHECK ALL POSSIBLE FIELDS\n    const firstName = person.first_name || person.firstName || '';\n    const lastName = person.last_name || person.lastName || person.last_name_obfuscated || '';\n    const fullName = person.name || person.full_name || `${firstName} ${lastName}`.trim() || '';\n    \n    // Extract other fields\n    const email = person.email || '';\n    const linkedinUrl = person.linkedin_url || person.linkedinUrl || '';\n    const jobTitle = person.title || person.job_title || '';\n    const companyName = person.organization?.name || person.organization_name || person.company || '';\n    \n    console.log(`Extracted: ${firstName} ${lastName} | ${jobTitle} | LinkedIn: ${linkedinUrl ? 'YES' : 'NO'}`);\n    \n    contacts.push({\n      json: {\n        // Hotel data\n        sr_no: hotelData.sr_no || '',\n        hotel_name: hotelData.hotel_name || '',\n        location: hotelData.location || '',\n        company_domain: hotelData.company_domain || '',\n        \n        // Apollo ID\n        apollo_id: person.id || '',\n        \n        // Contact details\n        first_name: firstName,\n        last_name: lastName,\n        full_name: fullName,\n        job_title: jobTitle,\n        linkedin_url: linkedinUrl,\n        company_name: companyName,\n        email: email,\n        phone: workPhone,\n        \n        // Debug\n        _raw_person: person\n      }\n    });\n  }\n  \n  if (searchResults.length === 0) {\n    console.log(`❌ No contacts found for: ${hotelData.hotel_name}`);\n    contacts.push({\n      json: {\n        sr_no: hotelData.sr_no || '',\n        hotel_name: hotelData.hotel_name || '',\n        location: hotelData.location || '',\n        company_domain: hotelData.company_domain || '',\n        error: 'No contacts found'\n      }\n    });\n  }\n}\n\nconsole.log(`\\n✅ Total contacts extracted: ${contacts.length}`);\nreturn contacts;"
+      },
+      "id": "ec578855-4910-40fd-ab0e-3b03a1a578ed",
+      "name": "Parse Search Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1968,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.apollo.io/api/v1/people/match",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"id\": \"{{ $json.apollo_id }}\",\n  \"reveal_personal_emails\": true,\n  \"reveal_phone_number\": false\n}",
+        "options": {}
+      },
+      "id": "77b6bd14-064a-4f5b-957b-a3a8a21a58c6",
+      "name": "Apollo Enrich Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1760,
+        240
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "<REDACTED_CREDENTIAL_ID>", "name": "<REDACTED_CREDENTIAL_NAME>"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst enriched = [];\n\n// Get the data from Parse Search Results to retrieve hotel info\nconst searchResultsItems = $('Parse Search Results').all();\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const person = item.json.person || item.json;\n  \n  // Get corresponding hotel data from Parse Search Results\n  const originalData = searchResultsItems[i]?.json || {};\n  \n  // Extract phone numbers\n  const phones = person.phone_numbers || [];\n  const workPhone = phones.find(p => p.type === 'work')?.sanitized_number || '';\n  const mobilePhone = phones.find(p => p.type === 'mobile')?.sanitized_number || \n                      phones.find(p => p.type === 'home')?.sanitized_number || '';\n  \n  // Extract personal email\n  const personalEmails = person.personal_emails || [];\n  const personalEmail = personalEmails[0] || '';\n  \n  enriched.push({\n    json: {\n      // CRITICAL: Preserve hotel data from Parse Search Results\n      sr_no: originalData.sr_no || '',\n      hotel_name: originalData.hotel_name || '',\n      hotel_city: originalData.hotel_city || '',\n      hotel_state: originalData.hotel_state || '',\n      location: originalData.location || '',\n      company_domain: originalData.company_domain || '',\n      \n      // Contact details\n      first_name: person.first_name || originalData.first_name || '',\n      last_name: person.last_name || originalData.last_name || '',\n      full_name: person.name || originalData.full_name || '',\n      job_title: person.title || originalData.job_title || '',\n      \n      // Contact info (enriched)\n      email: person.email || '',\n      email_status: person.email_status || '',\n      phone: workPhone,\n      personal_email: personalEmail,\n      mobile: mobilePhone,\n      \n      // Professional info\n      linkedin_url: person.linkedin_url || originalData.linkedin_url || '',\n      company_name: person.organization?.name || '',\n      \n      // Metadata\n      enriched: true,\n      has_email: !!(person.email),\n      has_phone: !!(workPhone),\n      has_personal_email: !!(personalEmail),\n      has_mobile: !!(mobilePhone)\n    }\n  });\n}\n\nreturn enriched;"
+      },
+      "id": "f55ce045-faf8-4d6c-ac63-e704c614b18a",
+      "name": "Merge Enriched Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1552,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst formatted = [];\n\nfor (const item of items) {\n  const data = item.json;\n  \n  // Clean phone format\n  const cleanPhone = (phone) => {\n    if (!phone) return '';\n    return `'${phone.toString().replace(/[^\\d\\s\\+\\-\\(\\)]/g, '').trim()}`;\n  };\n  \n  formatted.push({\n    json: {\n      // MATCHING COLUMN (with dot!)\n      'Sr. no.': data.sr_no || '',\n      \n      // UPDATE ONLY THESE COLUMNS\n      'FIRST NAME ': data.first_name || '',\n      'Last Name': data.last_name || '',\n      ' Full Name': data.full_name || '',\n      'Location': data.location || '',\n      'Job Title': data.job_title || '',\n      'Company Domain': data.company_domain || '',\n      'Exact Hotel Name': data.hotel_name || '',\n      'Google Maps Link': '',\n      'LinkedIn Profile': data.linkedin_url || '',\n      'Company Name': data.company_name || '',\n      'Email': data.email || '',\n      'Phone': cleanPhone(data.phone),\n      'Personal Email': data.personal_email || '',\n      'Personal Mobile Phone': cleanPhone(data.mobile)\n    }\n  });\n}\n\nreturn formatted;"
+      },
+      "id": "20c17cc1-c0ef-41ff-af2a-67af4a46d43a",
+      "name": "Format for Sheet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1376,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "1dH_lwlOHYJyzEnCP-AOnFzxodhWUrLEwoTd_fAIeG5A",
+          "mode": "list",
+          "cachedResultName": "MAIN HOTEL LEADS",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<REDACTED_SHEET_ID>/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 216592968,
+          "mode": "list",
+          "cachedResultName": "Copy of uncovered hotels.",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/<REDACTED_SHEET_ID>/edit#gid=216592968"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "FIRST NAME ": "={{ $json['FIRST NAME '] }}",
+            "Last Name": "={{ $json['Last Name'] }}",
+            " Full Name": "={{ $json[' Full Name'] }}",
+            "Location": "={{ $json.Location }}",
+            "Job Title": "={{ $json['Job Title'] }}",
+            "Company Domain": "={{ $json['Company Domain'] }}",
+            "Exact Hotel Name": "={{ $json['Exact Hotel Name'] }}",
+            "Google Maps Link": "={{ $json['Google Maps Link'] }}",
+            "LinkedIn Profile": "={{ $json['LinkedIn Profile'] }}",
+            "Company Name": "={{ $json['Company Name'] }}",
+            "Email": "={{ $json.Email }}",
+            "Phone": "={{ $json.Phone }}",
+            "Personal Email": "={{ $json['Personal Email'] }}",
+            "Personal Mobile Phone": "={{ $json['Personal Mobile Phone'] }}",
+            "Sr. no.": "={{ $json['Sr. no.'] }}",
+            "row_number": 0
+          },
+          "matchingColumns": [
+            "Sr. no."
+          ],
+          "schema": [
+            {
+              "id": "Sr. no.",
+              "displayName": "Sr. no.",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Hotel name",
+              "displayName": "Hotel name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "FIRST NAME ",
+              "displayName": "FIRST NAME ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Last Name",
+              "displayName": "Last Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": " Full Name",
+              "displayName": " Full Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Location",
+              "displayName": "Location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Job Title",
+              "displayName": "Job Title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Company Domain",
+              "displayName": "Company Domain",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Exact Hotel Name",
+              "displayName": "Exact Hotel Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Google Maps Link",
+              "displayName": "Google Maps Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "LinkedIn Profile",
+              "displayName": "LinkedIn Profile",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Company Name",
+              "displayName": "Company Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Phone",
+              "displayName": "Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Personal Email",
+              "displayName": "Personal Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Personal Mobile Phone",
+              "displayName": "Personal Mobile Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "30c01135-ec5f-41cb-8fc1-97aae51b96ba",
+      "name": "Write to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [
+        -1216,
+        240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "<REDACTED_CREDENTIAL_ID>", "name": "<REDACTED_CREDENTIAL_NAME>"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Extract the ACTUAL HOTEL'S website domain (not the parent brand) and location from this hotel name.\n\nHotel Name: {{ $json['Hotel name'] }}\n\nIMPORTANT: \n- Find the SPECIFIC HOTEL's domain, NOT the parent company (e.g., NOT marriott.com, hilton.com, ihg.com)\n- Look for domains like: hotelname.com, hotelname-city.com, management-company.com\n- If it's an independent hotel, find their actual website\n- If it's a franchise, try to find the franchise operator's domain\n\nReturn in this exact format:\nactual-hotel-domain.com|City, State\n\nExamples:\n- \"Holiday Inn Princeton by IHG\" → holidayinnprinceton.com|Princeton, NJ\n- \"Marriott Downtown Chicago\" → chicagomarriott.com|Chicago, IL\n- \"Hampton Inn Boston Logan\" → hamptoninnboston.com|Boston, MA\n\nReturn format: domain.com|City, State (nothing else)",
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [
+        -2896,
+        240
+      ],
+      "id": "227cd105-7116-45dc-999a-2d23ee42ae94",
+      "name": "Basic LLM Chain"
+    },
+    {
+      "parameters": {
+        "model": "llama-3.3-70b-versatile",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        -2944,
+        416
+      ],
+      "id": "1260ea82-849e-4cb3-bb6f-cea82a0d064a",
+      "name": "Groq Chat Model",
+      "credentials": {
+        "groqApi": {
+          "id": "<REDACTED_CREDENTIAL_ID>", "name": "<REDACTED_CREDENTIAL_NAME>"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Hotel Names",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Hotel Names": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Domain Output": {
+      "main": [
+        [
+          {
+            "node": "Apollo People Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo People Search": {
+      "main": [
+        [
+          {
+            "node": "Parse Search Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Search Results": {
+      "main": [
+        [
+          {
+            "node": "Apollo Enrich Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo Enrich Contact": {
+      "main": [
+        [
+          {
+            "node": "Merge Enriched Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Enriched Data": {
+      "main": [
+        [
+          {
+            "node": "Format for Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format for Sheet": {
+      "main": [
+        [
+          {
+            "node": "Write to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain": {
+      "main": [
+        [
+          {
+            "node": "Parse Domain Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "triggerCount": 0,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
